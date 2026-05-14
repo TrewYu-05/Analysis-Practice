@@ -83,6 +83,42 @@ def basic_outlier_detection(df: pd.DataFrame, dataset_name: str):
     )
 
 
+# ─── Quality 分布柱状图 ──────────────────────────────────────────────────────
+def plot_quality_distribution(df: pd.DataFrame, dataset_name: str):
+    """
+    绘制 quality 列的分布柱状图，保存为 SVG + PDF 矢量图。
+
+    Parameters:
+        df: pd.DataFrame, 包含 quality 列的数据
+        dataset_name: str, 数据集名称，用于图表标题和文件名
+    """
+    os.makedirs("results", exist_ok=True)
+
+    quality_counts = df["quality"].value_counts().sort_index()
+
+    plt.figure(figsize=(8, 5))
+    bars = plt.bar(quality_counts.index.astype(int).astype(str), quality_counts.values,
+                   color="steelblue", edgecolor="black")
+
+    # 在柱顶标注数值
+    for bar, val in zip(bars, quality_counts.values):
+        plt.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 1,
+                 str(val), ha="center", va="bottom", fontsize=9)
+
+    plt.xlabel("Quality Score")
+    plt.ylabel("Sample Count")
+    plt.tight_layout()
+
+    out_svg = f"results/{dataset_name}_quality_bar.svg"
+    out_pdf = f"results/{dataset_name}_quality_bar.pdf"
+    plt.savefig(out_svg)
+    plt.savefig(out_pdf)
+    plt.close()
+
+    print(f"Quality 柱状图已保存: {out_svg} / {out_pdf}")
+    print(f"  Quality 分布: {dict(quality_counts)}")
+
+
 # ─── SOTA 异常值识别 ─────────────────────────────────────────────────────────
 def sota_outlier_detection(df: pd.DataFrame, dataset_name: str):
     """
@@ -136,8 +172,6 @@ def sota_outlier_detection(df: pd.DataFrame, dataset_name: str):
         raw = iso.decision_function(X)
         scores = -raw.astype(np.float64)
 
-    # ──── 保存异常点表格 ────
-    # 用 IQR 确定阈值：得分 > Q3 + 1.5*IQR 视为异常
     threshold = np.percentile(scores, 95)
 
     out_df = df.copy()
@@ -155,16 +189,59 @@ def sota_outlier_detection(df: pd.DataFrame, dataset_name: str):
     return scores
 
 
+# ─── 删除 SOTA 异常点 ────────────────────────────────────────────────────────
+def remove_sota_outliers(dataset_name: str):
+    """
+    根据 SOTA 异常检测结果，删除被标记为异常（is_outlier=True）的行，
+    将清洗后的数据集保存到 data/ 目录。
+
+    Parameters:
+        dataset_name: str, 数据集名称前缀，如 "RED" 或 "WHITE"
+    Returns:
+        pd.DataFrame, 清洗后的数据
+    """
+    os.makedirs("data", exist_ok=True)
+
+    # 读取 SOTA 异常检测结果
+    sota_path = f"results/{dataset_name}_sota_outliers.csv"
+    df_sota = pd.read_csv(sota_path)
+
+    n_total = len(df_sota)
+    n_outliers = int(df_sota["is_outlier"].sum())
+
+    # 删除异常行
+    df_clean = df_sota[~df_sota["is_outlier"]].copy()
+
+    # 删除 anomaly_score 和 is_outlier 列
+    df_clean = df_clean.drop(columns=["anomaly_score", "is_outlier"])
+
+    # 保存清洗后的数据（使用分号分隔，与原始数据格式一致）
+    name_lower = dataset_name.lower()
+    out_path = f"data/winequality-{name_lower}-cleaned.csv"
+    df_clean.to_csv(out_path, sep=";", index=False)
+
+    print(
+        f"数据集 {dataset_name}: 删除 {n_outliers} 个异常点, "
+        f"保留 {len(df_clean)}/{n_total} 行 → {out_path}"
+    )
+
+    return df_clean
+
+
 # ─── 归一化 ──────────────────────────────────────────────────────────────────
 def normalize_data(df):
     """
     标准化(归一化)处理。将两张表格中的数据进行归一化处理 (Min-Max scaling)。
-    quality也归一化。
     """
+    df_scaled = df.copy()
+    
+    cols_to_scale = [col for col in df_scaled.columns if col != 'quality']
+    
     scaler = MinMaxScaler()
-    normalized_data = scaler.fit_transform(df)
-    normalized_df = pd.DataFrame(normalized_data, columns=df.columns, index=df.index)
-    return normalized_df
+    if cols_to_scale:
+        df_scaled[cols_to_scale] = scaler.fit_transform(df_scaled[cols_to_scale])
+        
+    return df_scaled
 
 
 # ─── 表格合并 ────────────────────────────────────────────────────────────────
@@ -188,15 +265,60 @@ def merge_datasets(red_df, white_df):
     return merged_df
 
 
+# ─── 清洗后归一化合并 ────────────────────────────────────────────────────────
+def merge_cleaned_datasets():
+    """
+    读取清洗后的红/白葡萄酒数据（已通过 remove_sota_outliers 去除异常点），
+    进行 Min-Max 归一化，添加 type 字段（0=红, 1=白），
+    合并后保存到 data/winequality.csv。
+    """
+    red_clean = pd.read_csv("data/winequality-red-cleaned.csv", sep=";")
+    white_clean = pd.read_csv("data/winequality-white-cleaned.csv", sep=";")
+
+    print(f"RED cleaned: {red_clean.shape[0]} 行, WHITE cleaned: {white_clean.shape[0]} 行")
+
+    # 归一化
+    norm_red = normalize_data(red_clean.copy())
+    norm_white = normalize_data(white_clean.copy())
+
+    # 添加 type 字段
+    norm_red["type"] = 0
+    norm_white["type"] = 1
+
+    # 合并
+    merged_df = pd.concat([norm_red, norm_white], ignore_index=True)
+
+    os.makedirs("data", exist_ok=True)
+    merged_df.to_csv("data/winequality.csv", index=False)
+
+    print(
+        f"合并完成: {norm_red.shape[0]} 红 + {norm_white.shape[0]} 白"
+        f" → {merged_df.shape[0]} 行, {merged_df.shape[1]} 列"
+    )
+    print("归一化合并数据集已保存至 data/winequality.csv")
+
+    return merged_df
+
+
 # ─── main ────────────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     red_df = pd.read_csv("data/winequality-red.csv", sep=";")
     white_df = pd.read_csv("data/winequality-white.csv", sep=";")
 
     # check_missing_and_duplicates(red_df, "RED")
-    basic_outlier_detection(red_df, "RED")
+    # basic_outlier_detection(red_df, "RED")
     # check_missing_and_duplicates(white_df, "WHITE")
-    basic_outlier_detection(white_df, "WHITE")
+    # basic_outlier_detection(white_df, "WHITE")
 
-    sota_outlier_detection(red_df, "RED")
-    sota_outlier_detection(white_df, "WHITE")
+    # sota_outlier_detection(red_df, "RED")
+    # sota_outlier_detection(white_df, "WHITE")
+
+    cleaned_red_df = pd.read_csv("data/winequality-red-cleaned.csv")
+    cleaned_white_df = pd.read_csv("data/winequality-white-cleaned.csv")
+
+    # merge_datasets(cleaned_red_df,cleaned_white_df)
+
+    df = pd.read_csv("data/winequality.csv")
+
+    plot_quality_distribution(df,"winequality")
+    # check_missing_and_duplicates(df,"winequality")
