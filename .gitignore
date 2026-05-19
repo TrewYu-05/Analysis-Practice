@@ -19,3 +19,4 @@ Thumbs.db
 # 临时文件
 *_debug_*.py
 *_test_*.py
+results/
